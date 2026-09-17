@@ -957,6 +957,18 @@ el.programEditor.addEventListener('paste', async (e) => {
     e.preventDefault();
     const file = imageItem.getAsFile();
     if (file) await insertImageIntoEditor(file);
+    return;
+  }
+  // Вставляем ТОЛЬКО как обычный текст. Если разрешить вставку чужой разметки
+  // (например, таблицы из документа или сайта), санитайзер при сохранении
+  // выбросит теги table/tr/td как неизвестные — и текст ячеек схлопнется
+  // в одну строку без разделителей. Явный insertText этого не допускает.
+  e.preventDefault();
+  const text = e.clipboardData.getData('text/plain');
+  if (text) {
+    document.execCommand('insertText', false, text);
+    hoistInvalidHeadingChildren(el.programEditor);
+    setEditorEmptyState();
   }
 });
 
