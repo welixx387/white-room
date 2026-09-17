@@ -5,21 +5,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>White Room</title>
 
-<!-- Google Fonts: Manrope для текста, Instrument Serif для заголовков -->
+<!-- Google Fonts: IBM Plex Sans для текста, Space Grotesk для заголовков, IBM Plex Mono для лейблов -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
+<!-- Экран-заставка: цитата при каждой загрузке страницы -->
+<div class="intro" id="introScreen">
+  <div class="intro__inner">
+    <p class="intro__kicker" id="introKicker">БЕЛАЯ КОМНАТА</p>
+    <blockquote class="intro__quote" id="introQuote"></blockquote>
+    <p class="intro__author">— Аянокоджи Киётака<span class="intro__note">*вымышленная реплика в характере персонажа</span></p>
+    <button type="button" class="intro__enter" id="introEnterBtn">Войти</button>
+  </div>
+</div>
+
 <!-- Шапка: логотип, поиск, кнопки экспорта/импорта -->
 <header class="topbar">
   <div class="topbar__inner">
     <button class="brand" id="brandBtn" type="button" aria-label="На главную">
-      <span class="brand__dot" aria-hidden="true"></span>
-      <span class="brand__text">White Room</span>
+      <svg class="brand__mark" width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="23" height="23" rx="4" stroke="currentColor" stroke-width="1.6"/>
+        <rect x="11" y="11" width="4" height="4" rx="1" fill="currentColor"/>
+      </svg>
+      <span class="brand__text">WHITE ROOM</span>
     </button>
 
     <div class="search">
@@ -93,6 +106,10 @@
         <span class="field__label">Название категории</span>
         <input type="text" id="categoryNameInput" class="field__input" placeholder="Например, «Программы тренировок»" required maxlength="80" autocomplete="off">
       </label>
+      <div class="field">
+        <span class="field__label">Цвет метки</span>
+        <div class="swatches" id="categoryColorSwatches"></div>
+      </div>
       <div class="form__actions">
         <button type="button" class="btn btn--ghost" data-close>Отмена</button>
         <button type="submit" class="btn btn--primary">Сохранить</button>
@@ -126,10 +143,36 @@
         <input type="text" id="programTitleInput" class="field__input" placeholder="Название программы" required maxlength="120" autocomplete="off">
       </label>
 
-      <label class="field">
-        <span class="field__label">Описание / текст программы</span>
-        <textarea id="programDescInput" class="field__textarea" rows="8" placeholder="Текст программы…"></textarea>
-      </label>
+      <div class="field-row">
+        <label class="field">
+          <span class="field__label">Категория</span>
+          <select id="programCategorySelect" class="field__input field__select"></select>
+        </label>
+        <div class="field">
+          <span class="field__label">Цвет метки</span>
+          <div class="swatches" id="programColorSwatches"></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field__label">Текст программы</span>
+        <div class="editor">
+          <div class="editor__toolbar" role="toolbar" aria-label="Форматирование текста">
+            <button type="button" class="editor__btn" data-cmd="bold" aria-label="Жирный"><b>Ж</b></button>
+            <button type="button" class="editor__btn" data-cmd="italic" aria-label="Курсив"><i>К</i></button>
+            <button type="button" class="editor__btn" data-cmd="formatBlock" data-value="H3" aria-label="Заголовок">H</button>
+            <button type="button" class="editor__btn" data-cmd="insertUnorderedList" aria-label="Список">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="2" cy="3.5" r="1" fill="currentColor"/><circle cx="2" cy="7" r="1" fill="currentColor"/><circle cx="2" cy="10.5" r="1" fill="currentColor"/><path d="M5.5 3.5h7M5.5 7h7M5.5 10.5h7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            </button>
+            <span class="editor__sep" aria-hidden="true"></span>
+            <button type="button" class="editor__btn" id="editorImageBtn" aria-label="Вставить фото">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1.5" y="2.5" width="11" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2"/><circle cx="5" cy="6" r="1" stroke="currentColor" stroke-width="1"/><path d="M2 9.5l3-3 2 2 2.5-3 2.5 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <div class="editor__area" id="programEditor" contenteditable="true" data-placeholder="Текст программы… фото можно вставлять прямо сюда, перетащив файл или вставив из буфера"></div>
+        </div>
+        <input type="file" id="editorImageInput" accept="image/*" multiple hidden>
+      </div>
 
       <div class="form__actions">
         <button type="button" class="btn btn--ghost" data-close>Отмена</button>
@@ -148,7 +191,7 @@
     <img class="view-cover" id="viewCoverImg" alt="" hidden>
     <div class="view-body">
       <h2 class="modal__title" id="viewModalTitle"></h2>
-      <p class="view-text" id="viewModalText"></p>
+      <div class="view-text" id="viewModalText"></div>
     </div>
   </div>
 </div>

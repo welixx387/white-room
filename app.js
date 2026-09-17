@@ -2,7 +2,7 @@
 
 /* =========================================================================
    White Room — личная библиотека контента.
-   Всё хранится локально: тексты в localStorage, обложки — в IndexedDB.
+   Всё хранится локально: тексты в localStorage, изображения — в IndexedDB.
    Никаких серверов, логинов и внешних API.
    ========================================================================= */
 
@@ -20,9 +20,16 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Старый обычный текст описания -> HTML-абзацы (для миграции старых записей)
+function textToContentHtml(text) {
+  if (!text) return '';
+  return '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
+}
+
 /* ============================ IndexedDB слой ============================
-   Храним обложки как Blob в IndexedDB (localStorage слишком мал для картинок).
-   В основном JSON (localStorage) программы хранят только ссылку coverId.
+   Храним изображения (обложки и картинки внутри текста) как Blob в IndexedDB —
+   localStorage слишком мал для картинок. В основном JSON (localStorage)
+   храним только ссылки на них (coverId / data-cover-id).
    ========================================================================= */
 
 const IDB_NAME = 'whiteRoomDB';
@@ -86,7 +93,7 @@ async function idbGetAllImages() {
   });
 }
 
-// Сжимаем изображение до ширины ~800px через canvas и возвращаем Blob (JPEG)
+// Сжимаем изображение до заданной ширины через canvas и возвращаем Blob (JPEG)
 function resizeImageToBlob(file, maxWidth = 800, quality = 0.85) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -113,10 +120,10 @@ function resizeImageToBlob(file, maxWidth = 800, quality = 0.85) {
 }
 
 /* ===== Кэш object URL для показа изображений из IndexedDB на странице ===== */
-const imageUrlCache = new Map(); // coverId -> object URL
+const imageUrlCache = new Map(); // id -> object URL
 
-function getCachedImageUrl(coverId) {
-  return coverId ? imageUrlCache.get(coverId) || null : null;
+function getCachedImageUrl(id) {
+  return id ? imageUrlCache.get(id) || null : null;
 }
 
 async function preloadAllImages() {
@@ -126,19 +133,58 @@ async function preloadAllImages() {
   }
 }
 
-async function setImageForCover(coverId, blob) {
-  await idbPutImage(coverId, blob);
-  const old = imageUrlCache.get(coverId);
+async function setImageForCover(id, blob) {
+  await idbPutImage(id, blob);
+  const old = imageUrlCache.get(id);
   if (old) URL.revokeObjectURL(old);
-  imageUrlCache.set(coverId, URL.createObjectURL(blob));
+  imageUrlCache.set(id, URL.createObjectURL(blob));
 }
 
-async function removeCoverImage(coverId) {
-  if (!coverId) return;
-  await idbDeleteImage(coverId);
-  const old = imageUrlCache.get(coverId);
+async function removeCoverImage(id) {
+  if (!id) return;
+  await idbDeleteImage(id);
+  const old = imageUrlCache.get(id);
   if (old) URL.revokeObjectURL(old);
-  imageUrlCache.delete(coverId);
+  imageUrlCache.delete(id);
+}
+
+/* ============================ Цветовые метки ============================= */
+
+const COLOR_PALETTE = [
+  { name: 'Стальной',  value: '#7C93A6' },
+  { name: 'Графит',    value: '#5C6672' },
+  { name: 'Иней',      value: '#A9C2CE' },
+  { name: 'Пепел',     value: '#8A8A85' },
+  { name: 'Кость',     value: '#C9C2B4' },
+  { name: 'Ржавчина',  value: '#B4715A' },
+  { name: 'Мох',       value: '#7C8C6E' },
+  { name: 'Вино',      value: '#8C5A63' },
+];
+
+function renderColorSwatches(container, selectedColor, onSelect) {
+  container.innerHTML = '';
+  const makeBtn = (value, label) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'swatch' + (value ? '' : ' swatch--none');
+    if (value) btn.style.setProperty('--swatch-color', value);
+    const selected = (selectedColor || null) === value;
+    if (selected) btn.classList.add('is-selected');
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-pressed', String(selected));
+    btn.addEventListener('click', () => {
+      container.querySelectorAll('.swatch').forEach((b) => {
+        b.classList.remove('is-selected');
+        b.setAttribute('aria-pressed', 'false');
+      });
+      btn.classList.add('is-selected');
+      btn.setAttribute('aria-pressed', 'true');
+      onSelect(value);
+    });
+    return btn;
+  };
+  container.appendChild(makeBtn(null, 'Без цвета'));
+  COLOR_PALETTE.forEach((c) => container.appendChild(makeBtn(c.value, c.name)));
 }
 
 /* ================================ Store =================================
@@ -157,6 +203,24 @@ const store = {
     } catch {
       this.categories = [];
     }
+    this._migrate();
+  },
+
+  // Приводим старые записи (без color/contentHtml) к текущему формату
+  _migrate() {
+    let changed = false;
+    this.categories.forEach((cat) => {
+      if (!('color' in cat)) { cat.color = null; changed = true; }
+      (cat.programs || []).forEach((prog) => {
+        if (!('contentHtml' in prog)) {
+          prog.contentHtml = textToContentHtml(prog.description || '');
+          delete prog.description;
+          changed = true;
+        }
+        if (!('color' in prog)) { prog.color = null; changed = true; }
+      });
+    });
+    if (changed) this.save();
   },
 
   save() {
@@ -168,25 +232,25 @@ const store = {
     return this.categories.find((c) => c.id === id) || null;
   },
 
-  addCategory(name) {
-    const cat = { id: makeId('cat'), name, order: this.categories.length, programs: [] };
+  addCategory(name, color) {
+    const cat = { id: makeId('cat'), name, color: color || null, order: this.categories.length, programs: [] };
     this.categories.push(cat);
     this.save();
     return cat;
   },
 
-  updateCategory(id, name) {
+  updateCategory(id, name, color) {
     const cat = this.getCategory(id);
     if (!cat) return;
     cat.name = name;
+    cat.color = color || null;
     this.save();
   },
 
   deleteCategory(id) {
     const cat = this.getCategory(id);
     if (!cat) return;
-    // удаляем все обложки программ этой категории
-    cat.programs.forEach((p) => { if (p.coverId) removeCoverImage(p.coverId); });
+    cat.programs.forEach((p) => removeAllProgramImages(p));
     this.categories = this.categories.filter((c) => c.id !== id);
     this.categories.forEach((c, i) => { c.order = i; });
     this.save();
@@ -202,10 +266,10 @@ const store = {
     this.save();
   },
 
-  addProgram(categoryId, { title, description, coverId }) {
+  addProgram(categoryId, { title, color, coverId, contentHtml }) {
     const cat = this.getCategory(categoryId);
     if (!cat) return null;
-    const prog = { id: makeId('prog'), title, description, coverId: coverId || null };
+    const prog = { id: makeId('prog'), title, color: color || null, coverId: coverId || null, contentHtml: contentHtml || '' };
     cat.programs.push(prog);
     this.save();
     return prog;
@@ -220,11 +284,24 @@ const store = {
     this.save();
   },
 
+  // Переносит программу в другую категорию (при смене категории в форме редактирования)
+  moveProgram(fromCategoryId, toCategoryId, programId, patch) {
+    const fromCat = this.getCategory(fromCategoryId);
+    const toCat = this.getCategory(toCategoryId);
+    if (!fromCat || !toCat) return;
+    const idx = fromCat.programs.findIndex((p) => p.id === programId);
+    if (idx === -1) return;
+    const [prog] = fromCat.programs.splice(idx, 1);
+    Object.assign(prog, patch);
+    toCat.programs.push(prog);
+    this.save();
+  },
+
   deleteProgram(categoryId, programId) {
     const cat = this.getCategory(categoryId);
     if (!cat) return;
     const prog = cat.programs.find((p) => p.id === programId);
-    if (prog && prog.coverId) removeCoverImage(prog.coverId);
+    if (prog) removeAllProgramImages(prog);
     cat.programs = cat.programs.filter((p) => p.id !== programId);
     this.save();
   },
@@ -240,6 +317,18 @@ const store = {
     this.save();
   },
 };
+
+function extractImageIds(html) {
+  if (!html) return [];
+  const container = document.createElement('div');
+  container.innerHTML = html;
+  return Array.from(container.querySelectorAll('img[data-cover-id]')).map((img) => img.getAttribute('data-cover-id'));
+}
+
+function removeAllProgramImages(prog) {
+  if (prog.coverId) removeCoverImage(prog.coverId);
+  extractImageIds(prog.contentHtml).forEach((id) => removeCoverImage(id));
+}
 
 /* ============================ Индикатор сохранения ======================= */
 
@@ -257,17 +346,24 @@ const ui = {
   view: 'categories', // 'categories' | 'programs'
   currentCategoryId: null,
   searchTerm: '',
-  editingCategoryId: null,   // если задано — модалка категории в режиме редактирования
-  editingProgramId: null,    // если задано — модалка программы в режиме редактирования
-  pendingCoverBlob: null,    // выбранная (ещё не сохранённая) обложка для формы программы
-  pendingCoverId: null,      // id существующей обложки при редактировании
-  removeCoverFlag: false,    // пользователь явно удалил обложку в форме
+  editingCategoryId: null,
+  editingProgramId: null,
+  pendingCoverBlob: null,
+  pendingCoverId: null,
+  removeCoverFlag: false,
   draggedId: null,
+  selectedCategoryColor: null,
+  selectedProgramColor: null,
 };
 
 /* ================================ DOM ссылки =============================== */
 
 const el = {
+  introScreen: document.getElementById('introScreen'),
+  introKicker: document.getElementById('introKicker'),
+  introQuote: document.getElementById('introQuote'),
+  introEnterBtn: document.getElementById('introEnterBtn'),
+
   categoriesView: document.getElementById('categoriesView'),
   programsView: document.getElementById('programsView'),
   categoriesGrid: document.getElementById('categoriesGrid'),
@@ -290,18 +386,22 @@ const el = {
   categoryForm: document.getElementById('categoryForm'),
   categoryModalTitle: document.getElementById('categoryModalTitle'),
   categoryNameInput: document.getElementById('categoryNameInput'),
+  categoryColorSwatches: document.getElementById('categoryColorSwatches'),
 
   programModalBackdrop: document.getElementById('programModalBackdrop'),
   programModal: document.getElementById('programModal'),
   programForm: document.getElementById('programForm'),
   programModalTitle: document.getElementById('programModalTitle'),
   programTitleInput: document.getElementById('programTitleInput'),
-  programDescInput: document.getElementById('programDescInput'),
+  programCategorySelect: document.getElementById('programCategorySelect'),
+  programColorSwatches: document.getElementById('programColorSwatches'),
   dropzone: document.getElementById('dropzone'),
   dropzoneHint: document.getElementById('dropzoneHint'),
   coverPreview: document.getElementById('coverPreview'),
   coverFileInput: document.getElementById('coverFileInput'),
   removeCoverBtn: document.getElementById('removeCoverBtn'),
+  programEditor: document.getElementById('programEditor'),
+  editorImageInput: document.getElementById('editorImageInput'),
 
   viewModalBackdrop: document.getElementById('viewModalBackdrop'),
   viewModal: document.getElementById('viewModal'),
@@ -387,6 +487,16 @@ function renderCoverFallback(title) {
   return `<div class="card__cover-fallback">${escapeHtml(letter)}</div>`;
 }
 
+function plainTextFromHtml(html) {
+  const container = document.createElement('div');
+  container.innerHTML = html || '';
+  return container.textContent || '';
+}
+
+function colorDotHtml(color) {
+  return color ? `<span class="color-dot" style="--dot-color:${escapeHtml(color)}"></span>` : '';
+}
+
 function render() {
   if (ui.view === 'categories') {
     el.categoriesView.hidden = false;
@@ -423,6 +533,7 @@ function renderCategories() {
     card.style.animationDelay = `${Math.min(i, 12) * 60}ms`;
 
     card.innerHTML = `
+      <div class="card__accent" style="background:${cat.color ? escapeHtml(cat.color) : 'transparent'}"></div>
       <div class="card__drag" aria-hidden="true" title="Перетащить">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="4" cy="3" r="1.3" fill="currentColor"/><circle cx="10" cy="3" r="1.3" fill="currentColor"/><circle cx="4" cy="7" r="1.3" fill="currentColor"/><circle cx="10" cy="7" r="1.3" fill="currentColor"/><circle cx="4" cy="11" r="1.3" fill="currentColor"/><circle cx="10" cy="11" r="1.3" fill="currentColor"/></svg>
       </div>
@@ -435,7 +546,7 @@ function renderCategories() {
         </button>
       </div>
       <div class="card__body">
-        <h3 class="card__title">${escapeHtml(cat.name)}</h3>
+        <h3 class="card__title">${colorDotHtml(cat.color)}${escapeHtml(cat.name)}</h3>
         <span class="card__count">${cat.programs.length} ${pluralPrograms(cat.programs.length)}</span>
       </div>
     `;
@@ -507,8 +618,10 @@ function renderPrograms() {
     const coverHtml = coverUrl
       ? `<img class="card__cover" src="${coverUrl}" alt="">`
       : renderCoverFallback(prog.title);
+    const effectiveColor = prog.color || cat.color || null;
 
     card.innerHTML = `
+      <div class="card__accent" style="background:${effectiveColor ? escapeHtml(effectiveColor) : 'transparent'}"></div>
       <div class="card__drag" aria-hidden="true" title="Перетащить">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="4" cy="3" r="1.3" fill="currentColor"/><circle cx="10" cy="3" r="1.3" fill="currentColor"/><circle cx="4" cy="7" r="1.3" fill="currentColor"/><circle cx="10" cy="7" r="1.3" fill="currentColor"/><circle cx="4" cy="11" r="1.3" fill="currentColor"/><circle cx="10" cy="11" r="1.3" fill="currentColor"/></svg>
       </div>
@@ -523,7 +636,7 @@ function renderPrograms() {
       ${coverHtml}
       <div class="card__body">
         <h3 class="card__title">${escapeHtml(prog.title)}</h3>
-        <p class="card__meta">${escapeHtml((prog.description || '').slice(0, 60))}</p>
+        <p class="card__meta">${colorDotHtml(prog.color)}${escapeHtml(plainTextFromHtml(prog.contentHtml).slice(0, 60))}</p>
       </div>
     `;
 
@@ -591,6 +704,10 @@ function openCategoryModal(categoryId = null) {
   const cat = categoryId ? store.getCategory(categoryId) : null;
   el.categoryModalTitle.textContent = cat ? 'Редактировать категорию' : 'Новая категория';
   el.categoryNameInput.value = cat ? cat.name : '';
+  ui.selectedCategoryColor = cat ? cat.color : null;
+  renderColorSwatches(el.categoryColorSwatches, ui.selectedCategoryColor, (value) => {
+    ui.selectedCategoryColor = value;
+  });
   openModal(el.categoryModalBackdrop, el.categoryNameInput);
 }
 
@@ -599,9 +716,9 @@ el.categoryForm.addEventListener('submit', (e) => {
   const name = el.categoryNameInput.value.trim();
   if (!name) return;
   if (ui.editingCategoryId) {
-    store.updateCategory(ui.editingCategoryId, name);
+    store.updateCategory(ui.editingCategoryId, name, ui.selectedCategoryColor);
   } else {
-    store.addCategory(name);
+    store.addCategory(name, ui.selectedCategoryColor);
   }
   closeActiveModal();
   render();
@@ -609,9 +726,39 @@ el.categoryForm.addEventListener('submit', (e) => {
 
 /* ============================ Модалка программы ============================ */
 
+function populateCategorySelect(selectedId) {
+  el.programCategorySelect.innerHTML = '';
+  [...store.categories].sort((a, b) => a.order - b.order).forEach((cat) => {
+    const opt = document.createElement('option');
+    opt.value = cat.id;
+    opt.textContent = cat.name;
+    if (cat.id === selectedId) opt.selected = true;
+    el.programCategorySelect.appendChild(opt);
+  });
+}
+
+function setEditorEmptyState() {
+  const isEmpty = el.programEditor.textContent.trim() === '' && !el.programEditor.querySelector('img');
+  el.programEditor.classList.toggle('is-empty', isEmpty);
+}
+
+// <h3> и <p> по спецификации HTML не могут содержать блочные элементы (списки,
+// другие абзацы/заголовки) — но у execCommand в contenteditable есть баги,
+// из-за которых такие блоки иногда оказываются ВНУТРИ них. Поднимаем наружу.
+function hoistInvalidHeadingChildren(root) {
+  root.querySelectorAll('h3, p').forEach((container) => {
+    let anchor = container;
+    Array.from(container.querySelectorAll(':scope > ul, :scope > ol, :scope > p, :scope > div, :scope > h3')).forEach((blk) => {
+      anchor.after(blk);
+      anchor = blk;
+    });
+  });
+}
+
 function resetProgramForm() {
   el.programTitleInput.value = '';
-  el.programDescInput.value = '';
+  el.programEditor.innerHTML = '';
+  setEditorEmptyState();
   el.coverPreview.hidden = true;
   el.coverPreview.src = '';
   el.dropzoneHint.hidden = false;
@@ -620,6 +767,7 @@ function resetProgramForm() {
   ui.pendingCoverBlob = null;
   ui.pendingCoverId = null;
   ui.removeCoverFlag = false;
+  ui.selectedProgramColor = null;
 }
 
 function openProgramModal(programId = null) {
@@ -628,10 +776,18 @@ function openProgramModal(programId = null) {
   const cat = store.getCategory(ui.currentCategoryId);
   const prog = programId && cat ? cat.programs.find((p) => p.id === programId) : null;
 
+  populateCategorySelect(ui.currentCategoryId);
+
   el.programModalTitle.textContent = prog ? 'Редактировать программу' : 'Новая программа';
+  ui.selectedProgramColor = prog ? prog.color : null;
+  renderColorSwatches(el.programColorSwatches, ui.selectedProgramColor, (value) => {
+    ui.selectedProgramColor = value;
+  });
+
   if (prog) {
     el.programTitleInput.value = prog.title;
-    el.programDescInput.value = prog.description || '';
+    el.programEditor.innerHTML = hydrateForDisplay(prog.contentHtml || '');
+    setEditorEmptyState();
     if (prog.coverId) {
       ui.pendingCoverId = prog.coverId;
       const url = getCachedImageUrl(prog.coverId);
@@ -705,34 +861,201 @@ el.removeCoverBtn.addEventListener('click', (e) => {
   el.coverFileInput.value = '';
 });
 
+/* ---- Редактор текста программы (форматирование + вставка фото) ---- */
+
+document.querySelectorAll('.editor__btn[data-cmd]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    el.programEditor.focus();
+    document.execCommand(btn.dataset.cmd, false, btn.dataset.value || undefined);
+    updateEditorToolbarState();
+    setEditorEmptyState();
+  });
+});
+
+function updateEditorToolbarState() {
+  document.querySelectorAll('.editor__btn[data-cmd]').forEach((btn) => {
+    const cmd = btn.dataset.cmd;
+    let active = false;
+    try {
+      if (cmd === 'formatBlock') {
+        active = document.queryCommandValue('formatBlock').toLowerCase() === 'h3';
+      } else {
+        active = document.queryCommandState(cmd);
+      }
+    } catch { /* игнорируем неподдерживаемые команды */ }
+    btn.classList.toggle('is-active', active);
+  });
+}
+
+el.programEditor.addEventListener('keyup', updateEditorToolbarState);
+el.programEditor.addEventListener('mouseup', updateEditorToolbarState);
+el.programEditor.addEventListener('input', () => {
+  hoistInvalidHeadingChildren(el.programEditor);
+  setEditorEmptyState();
+});
+
+// Chrome по умолчанию иногда переносит строку внутри <div> — фиксируем <p>,
+// иначе такие блоки не попадают под стили .editor__area p / .view-text p
+el.programEditor.addEventListener('focus', () => {
+  try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch { /* noop */ }
+});
+
+// Enter в конце заголовка у Chrome иногда не выходит из <h3>, а просто переносит
+// строку внутри него — из-за этого список/абзац после заголовка ломает структуру.
+// Принудительно создаём новый абзац сразу после заголовка.
+el.programEditor.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey) return;
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return;
+  const node = sel.getRangeAt(0).startContainer;
+  const heading = (node.nodeType === Node.TEXT_NODE ? node.parentElement : node)?.closest('h3');
+  if (!heading || !el.programEditor.contains(heading)) return;
+  e.preventDefault();
+  const p = document.createElement('p');
+  p.innerHTML = '<br>';
+  heading.after(p);
+  const range = document.createRange();
+  range.setStart(p, 0);
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+  setEditorEmptyState();
+});
+
+async function insertImageIntoEditor(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  try {
+    const blob = await resizeImageToBlob(file, 900, 0.85);
+    const id = makeId('img');
+    await setImageForCover(id, blob);
+    const url = getCachedImageUrl(id);
+    el.programEditor.focus();
+    document.execCommand('insertHTML', false, `<img src="${url}" data-cover-id="${id}" alt="">`);
+    setEditorEmptyState();
+  } catch (err) {
+    console.error(err);
+    alert('Не удалось вставить изображение.');
+  }
+}
+
+document.getElementById('editorImageBtn').addEventListener('click', () => el.editorImageInput.click());
+el.editorImageInput.addEventListener('change', async () => {
+  const files = Array.from(el.editorImageInput.files || []);
+  for (const file of files) await insertImageIntoEditor(file);
+  el.editorImageInput.value = '';
+});
+el.programEditor.addEventListener('dragover', (e) => e.preventDefault());
+el.programEditor.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  const files = Array.from(e.dataTransfer.files || []).filter((f) => f.type.startsWith('image/'));
+  for (const file of files) await insertImageIntoEditor(file);
+});
+el.programEditor.addEventListener('paste', async (e) => {
+  const items = Array.from(e.clipboardData?.items || []);
+  const imageItem = items.find((it) => it.type.startsWith('image/'));
+  if (imageItem) {
+    e.preventDefault();
+    const file = imageItem.getAsFile();
+    if (file) await insertImageIntoEditor(file);
+  }
+});
+
+/* ---- Санитайзинг и подготовка HTML текста программы к хранению/показу ---- */
+
+const ALLOWED_TAGS = new Set(['B', 'STRONG', 'I', 'EM', 'U', 'BR', 'P', 'DIV', 'UL', 'OL', 'LI', 'H3', 'IMG']);
+
+function sanitizeEditorHtml(html) {
+  const container = document.createElement('div');
+  container.innerHTML = html || '';
+  const walk = (node) => {
+    Array.from(node.childNodes).forEach((child) => {
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        if (!ALLOWED_TAGS.has(child.tagName)) {
+          while (child.firstChild) node.insertBefore(child.firstChild, child);
+          node.removeChild(child);
+          return;
+        }
+        Array.from(child.attributes).forEach((attr) => {
+          const keep = child.tagName === 'IMG' && (attr.name === 'data-cover-id' || attr.name === 'alt');
+          if (!keep) child.removeAttribute(attr.name);
+        });
+        walk(child);
+      } else if (child.nodeType !== Node.TEXT_NODE) {
+        node.removeChild(child);
+      }
+    });
+  };
+  walk(container);
+  hoistInvalidHeadingChildren(container);
+  // браузер сам «расплетает» невалидную вложенность (например <p><ul>…</ul></p>)
+  // при парсинге innerHTML выше, но оставляет пустые p/div-обрубки — убираем их
+  container.querySelectorAll('p, div').forEach((elm) => {
+    if (elm.innerHTML.trim() === '') elm.remove();
+  });
+  // src не храним — при показе подставляем актуальный object URL по data-cover-id
+  container.querySelectorAll('img[data-cover-id]').forEach((img) => img.removeAttribute('src'));
+  return container.innerHTML;
+}
+
+function hydrateForDisplay(html) {
+  const container = document.createElement('div');
+  container.innerHTML = html || '';
+  container.querySelectorAll('img[data-cover-id]').forEach((img) => {
+    const url = getCachedImageUrl(img.getAttribute('data-cover-id'));
+    if (url) img.setAttribute('src', url);
+  });
+  return container.innerHTML;
+}
+
 el.programForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const title = el.programTitleInput.value.trim();
-  const description = el.programDescInput.value; // переносы строк сохраняются как есть
   if (!title) return;
 
-  const cat = store.getCategory(ui.currentCategoryId);
-  if (!cat) return;
+  const targetCategoryId = el.programCategorySelect.value;
+  const sourceCat = store.getCategory(ui.currentCategoryId);
+  const targetCat = store.getCategory(targetCategoryId);
+  if (!sourceCat || !targetCat) return;
 
   let coverId = ui.pendingCoverId;
-
-  // если пользователь выбрал новый файл — сохраняем его в IndexedDB
   if (ui.pendingCoverBlob) {
     coverId = coverId || makeId('cover');
     await setImageForCover(coverId, ui.pendingCoverBlob);
   } else if (ui.removeCoverFlag && ui.editingProgramId) {
-    const existing = cat.programs.find((p) => p.id === ui.editingProgramId);
+    const existing = sourceCat.programs.find((p) => p.id === ui.editingProgramId);
     if (existing && existing.coverId) await removeCoverImage(existing.coverId);
     coverId = null;
   }
 
+  const contentHtml = sanitizeEditorHtml(el.programEditor.innerHTML);
+
+  // удаляем изображения текста, которые пользователь убрал при редактировании
   if (ui.editingProgramId) {
-    store.updateProgram(ui.currentCategoryId, ui.editingProgramId, { title, description, coverId });
+    const existing = sourceCat.programs.find((p) => p.id === ui.editingProgramId);
+    if (existing) {
+      const oldIds = extractImageIds(existing.contentHtml);
+      const newIds = extractImageIds(contentHtml);
+      for (const id of oldIds) if (!newIds.includes(id)) await removeCoverImage(id);
+    }
+  }
+
+  const patch = { title, color: ui.selectedProgramColor, coverId, contentHtml };
+
+  if (ui.editingProgramId) {
+    if (targetCategoryId !== ui.currentCategoryId) {
+      store.moveProgram(ui.currentCategoryId, targetCategoryId, ui.editingProgramId, patch);
+      ui.currentCategoryId = targetCategoryId; // переходим вслед за программой
+    } else {
+      store.updateProgram(ui.currentCategoryId, ui.editingProgramId, patch);
+    }
   } else {
-    store.addProgram(ui.currentCategoryId, { title, description, coverId });
+    store.addProgram(targetCategoryId, patch);
+    ui.currentCategoryId = targetCategoryId;
   }
 
   closeActiveModal();
+  const cat = store.getCategory(ui.currentCategoryId);
+  el.categoryTitle.textContent = cat ? cat.name : '';
   render();
 });
 
@@ -743,7 +1066,7 @@ function openProgramView(programId) {
   const prog = cat && cat.programs.find((p) => p.id === programId);
   if (!prog) return;
   el.viewModalTitle.textContent = prog.title;
-  el.viewModalText.textContent = prog.description || '';
+  el.viewModalText.innerHTML = hydrateForDisplay(prog.contentHtml || '');
   const url = getCachedImageUrl(prog.coverId);
   if (url) {
     el.viewCoverImg.src = url;
@@ -827,11 +1150,18 @@ el.exportBtn.addEventListener('click', async () => {
       if (prog.coverId && allImages.has(prog.coverId)) {
         coverData = await blobToBase64(allImages.get(prog.coverId));
       }
-      programs.push({ id: prog.id, title: prog.title, description: prog.description, coverData });
+      const contentImages = {};
+      for (const id of extractImageIds(prog.contentHtml)) {
+        if (allImages.has(id)) contentImages[id] = await blobToBase64(allImages.get(id));
+      }
+      programs.push({
+        id: prog.id, title: prog.title, color: prog.color || null,
+        contentHtml: prog.contentHtml, coverData, contentImages,
+      });
     }
-    exportCategories.push({ id: cat.id, name: cat.name, order: cat.order, programs });
+    exportCategories.push({ id: cat.id, name: cat.name, color: cat.color || null, order: cat.order, programs });
   }
-  const payload = { app: 'White Room', version: 1, exportedAt: new Date().toISOString(), categories: exportCategories };
+  const payload = { app: 'White Room', version: 2, exportedAt: new Date().toISOString(), categories: exportCategories };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -856,7 +1186,7 @@ el.importFile.addEventListener('change', async () => {
     const ok = confirm('Импорт заменит текущие данные библиотеки. Продолжить?');
     if (!ok) { el.importFile.value = ''; return; }
 
-    // очищаем текущие обложки
+    // очищаем текущие изображения
     const existingImages = await idbGetAllImages();
     for (const id of existingImages.keys()) await idbDeleteImage(id);
     imageUrlCache.forEach((url) => URL.revokeObjectURL(url));
@@ -869,19 +1199,30 @@ el.importFile.addEventListener('change', async () => {
         let coverId = null;
         if (prog.coverData) {
           coverId = makeId('cover');
-          const blob = await base64ToBlob(prog.coverData);
-          await setImageForCover(coverId, blob);
+          await setImageForCover(coverId, await base64ToBlob(prog.coverData));
         }
+
+        let contentHtml = prog.contentHtml != null ? prog.contentHtml : textToContentHtml(prog.description || '');
+        if (prog.contentImages) {
+          for (const [oldId, base64] of Object.entries(prog.contentImages)) {
+            const newId = makeId('img');
+            await setImageForCover(newId, await base64ToBlob(base64));
+            contentHtml = contentHtml.split(`data-cover-id="${oldId}"`).join(`data-cover-id="${newId}"`);
+          }
+        }
+
         programs.push({
           id: prog.id || makeId('prog'),
           title: prog.title || 'Без названия',
-          description: prog.description || '',
+          color: prog.color || null,
           coverId,
+          contentHtml,
         });
       }
       newCategories.push({
         id: cat.id || makeId('cat'),
         name: cat.name || 'Без названия',
+        color: cat.color || null,
         order: typeof cat.order === 'number' ? cat.order : newCategories.length,
         programs,
       });
@@ -900,12 +1241,80 @@ el.importFile.addEventListener('change', async () => {
   }
 });
 
+/* ============================ Цитаты на экране-заставке ======================
+   Оригинальные короткие реплики, написанные в характере и тоне персонажа
+   Аянокоджи Киётаки (стилизация, а не дословные цитаты источника).
+   ========================================================================= */
+
+const INTRO_QUOTES = [
+  'Способности не измеряются желанием — только результатом.',
+  'Слабость — это не черта характера. Это диагноз, который можно исправить.',
+  'Я не сужу людей. Я просто фиксирую переменные.',
+  'Комната без окон учит одному: то, что снаружи, не решает твою ценность.',
+  'Эмоции — это шум. Тишина эффективнее.',
+  'Я не одинок. Одиночество подразумевает, что кому-то есть до этого дело.',
+  'Мир не делится на добрых и злых. Он делится на полезных и лишних.',
+  'Меня не нужно понимать. Меня нужно либо превзойти, либо не мешать.',
+  'Если план работает без эмоций — он работает лучше.',
+  'Я не боюсь одиночества. Я вырос в комнате, где оно было единственной константой.',
+  'Слёзы ничего не доказывают, кроме того, что человек ещё не понял правил игры.',
+  'Контроль над собой — единственная свобода, которую нельзя отнять.',
+  'Меня учили не побеждать. Меня учили не проигрывать. Это разные вещи.',
+  'Я наблюдаю дольше, чем действую. Действие — последний шаг, а не первый.',
+  'Идеальный результат не требует свидетелей.',
+  'Белые стены не пугают. Пугает то, что за ними никто не ждёт тебя обратно.',
+  'Я не притворяюсь равнодушным. Я просто не вижу повода быть другим.',
+  'Каждый человек — это система. Нужно только найти входные данные.',
+  'Единственное, что имеет значение, — способен ты или нет. Остальное — оправдания.',
+  'Я не помню, когда в последний раз хотел, чтобы меня заметили. Возможно, никогда.',
+  'Если тебя можно сломать словами, ты ещё не начинал тренироваться.',
+  'Я не мщу. Месть — это трата ресурсов на то, что уже не имеет значения.',
+  'Одобрение — валюта, которая мне не нужна.',
+  'В комнате без цвета быстро учишься видеть оттенки, которые другие не замечают.',
+  'Я не выбирал быть таким. Но перестал жалеть об этом уже давно.',
+  'Люди боятся тишины — в ней слышно, насколько они зависят от чужого одобрения.',
+  'Победа без усилий — это не везение. Это подготовка, которую никто не видел.',
+  'Меня можно недооценить только один раз.',
+  'Сострадание — это инструмент, а не обязанность.',
+  'Я не ищу друзей. Я ищу тех, кто не подведёт в нужный момент.',
+  'Боль — это просто информация о пределах системы.',
+  'Комфорт делает человека предсказуемым. Предсказуемость делает его уязвимым.',
+  'Я не спорю с глупостью. Я просто перестаю тратить на неё время.',
+  'Если результат достигнут, неважно, поверил в тебя кто-то или нет.',
+  'Меня спрашивают, что я чувствую. Я отвечаю: то, что нужно для результата.',
+  'Пустая комната учит терпению лучше, чем любые слова.',
+  'Я не жду аплодисментов. Я жду конца необходимости доказывать очевидное.',
+  'Слабые ищут причины. Сильные — методы.',
+  'Я не измеряю дни. Я измеряю то, чему успел научиться за них.',
+  'Свобода — это не отсутствие стен. Это безразличие к тому, что они есть.',
+];
+
+function showIntroScreen() {
+  const quote = INTRO_QUOTES[Math.floor(Math.random() * INTRO_QUOTES.length)];
+  const sessionNo = String(Math.floor(100 + Math.random() * 900));
+  el.introKicker.textContent = `БЕЛАЯ КОМНАТА · ЗАПИСЬ №${sessionNo}`;
+  el.introQuote.textContent = quote;
+
+  const dismiss = () => {
+    el.introScreen.classList.add('is-hidden');
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = () => dismiss();
+
+  el.introEnterBtn.addEventListener('click', dismiss, { once: true });
+  el.introScreen.addEventListener('click', (e) => {
+    if (e.target === el.introScreen) dismiss();
+  }, { once: true });
+  document.addEventListener('keydown', onKey, { once: true });
+}
+
 /* ================================ Инициализация ============================== */
 
 async function init() {
   store.load();
   await preloadAllImages();
   render();
+  showIntroScreen();
 }
 
 init();
